@@ -1,0 +1,39 @@
+Below is the sample code
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, from_json, lit, regexp_replace, when
+from pyspark.sql.types import StructType
+
+# Initialize a Spark session
+spark = SparkSession.builder.appName("JSONDataProcessing").getOrCreate()
+
+# Define the input JSON data
+json_data = [
+    '{"NAME":"JHON","COMMENT":"He is good person?"ijjjj?"jdjjd","AGE":"25"}',
+    '{"NAME":"KEN","COMMENT":"He is good person","AGE":"30"}'
+]
+
+# Create a DataFrame from the JSON data
+df = spark.read.json(spark.sparkContext.parallelize(json_data))
+
+# Identify rows with bad records in the _corrupt_record column
+df = df.withColumn("_corrupt_record", when(col("_corrupt_record").isNotNull(), col("_corrupt_record")))
+
+# Replace the pattern ?" in all columns
+for column in df.columns:
+    df = df.withColumn(column, regexp_replace(col(column), "\\?\"", ""))
+
+# Create a schema for parsing _corrupt_record
+corrupt_schema = StructType()
+
+# Merge good records with bad records dynamically
+merged_df = df.withColumn("merged_data", when(col("_corrupt_record").isNotNull(),
+                                               from_json(col("_corrupt_record"), corrupt_schema))
+                          .otherwise(lit(None)))
+
+# Select the relevant columns
+merged_df = merged_df.select(*df.columns)
+
+# Show the resulting DataFrame
+merged_df.show(truncate=False)
