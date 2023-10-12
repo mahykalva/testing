@@ -1,3 +1,92 @@
+can u try our framework with below code :
+
+{
+  "name": "T_PROV_COMMENT",
+  "input": [
+    {
+      "name": "T_PROV_COMMENT_cdc",
+      "format": "json",
+      "options": {
+        "inferSchema": false,
+		"mode": "PERMISSIVE",
+		"columnNameOfCorruptRecord": "corrupt_record" 
+      },
+      "location":  "/test/incoming/raw/provider/ppw/cdc_fpi/gdbd/T_PROV_COMMENT"
+    }
+	],
+ "analyze": [
+    {
+      "name": "T_PROV_COMMENT_corrupt",
+      "dataframes": [ "T_PROV_COMMENT_cdc" ],
+      "sql": [
+          "select REPLACE(corrupted_record, ':[\"\\']([^\"\\']*)[\"\\']', ':[\"\\']$1[\"\\']') AS corrupted_record  from T_PROV_COMMENT_cdc where corrupt_record is NOT NULL"
+      ]
+    },
+    {
+      "name": "T_PROV_COMMENT_good",
+      "dataframes": [ "T_PROV_COMMENT_cdc" ],
+      "sql": [
+          "select *  from T_PROV_COMMENT_cdc where corrupt_record is NULL"
+      ]
+    }
+  ],
+	 "output": [
+    {
+      "name": "T_PROV_COMMENT_GOOD_DATA",
+      "dataframe": "T_PROV_COMMENT_good",
+      "format": "json",
+      "mode": "overwrite",
+      "location": "/test/incoming/raw/provider/ppw/cdc_fpi/gdbd/T_PROV_COMMENT_good"
+    },
+	 {
+      "name": "T_PROV_COMMENT_CORRUPT_DATA",
+      "dataframe": "T_PROV_COMMENT_corrupt",
+      "format": "json",
+      "mode": "overwrite",
+      "location": "/test/incoming/raw/provider/ppw/cdc_fpi/gdbd/T_PROV_COMMENT_corrupt"
+    }
+  ]
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Below is the sample code
 
 
