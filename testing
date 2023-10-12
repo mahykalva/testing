@@ -8,29 +8,29 @@ can u try our framework with below code :
       "format": "json",
       "options": {
         "inferSchema": false,
-		"mode": "PERMISSIVE",
-		"columnNameOfCorruptRecord": "corrupt_record" 
+        "mode": "PERMISSIVE",
+        "columnNameOfCorruptRecord": "corrupt_record"
       },
       "location":  "/test/incoming/raw/provider/ppw/cdc_fpi/gdbd/T_PROV_COMMENT"
     }
-	],
- "analyze": [
+  ],
+  "analyze": [
     {
       "name": "T_PROV_COMMENT_corrupt",
       "dataframes": [ "T_PROV_COMMENT_cdc" ],
       "sql": [
-          "select REPLACE(corrupted_record, ':[\"\\']([^\"\\']*)[\"\\']', ':[\"\\']$1[\"\\']') AS corrupted_record  from T_PROV_COMMENT_cdc where corrupt_record is NOT NULL"
+        "select REPLACE(corrupt_record, ':[\"\\']([^\"\\']*)[\"\\']', ':[\"\\']$1[\"\\']') AS corrupt_record from T_PROV_COMMENT_cdc where corrupt_record is NOT NULL"
       ]
     },
     {
       "name": "T_PROV_COMMENT_good",
       "dataframes": [ "T_PROV_COMMENT_cdc" ],
       "sql": [
-          "select *  from T_PROV_COMMENT_cdc where corrupt_record is NULL"
+        "select *  from T_PROV_COMMENT_cdc where corrupt_record is NULL"
       ]
     }
   ],
-	 "output": [
+  "output": [
     {
       "name": "T_PROV_COMMENT_GOOD_DATA",
       "dataframe": "T_PROV_COMMENT_good",
@@ -38,7 +38,7 @@ can u try our framework with below code :
       "mode": "overwrite",
       "location": "/test/incoming/raw/provider/ppw/cdc_fpi/gdbd/T_PROV_COMMENT_good"
     },
-	 {
+    {
       "name": "T_PROV_COMMENT_CORRUPT_DATA",
       "dataframe": "T_PROV_COMMENT_corrupt",
       "format": "json",
