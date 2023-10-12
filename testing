@@ -1,3 +1,10 @@
+regexp_replace(corrupt_record, '\\\\?\"', '') AS corrupt_record
+
+
+
+
+
+
 can u try our framework with below code :
 
 {
