@@ -1,3 +1,27 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import regexp_replace
+
+# Read in the data using spark.read.json()
+df = spark.read.text("sample.json").cache()
+df.show(truncate=False)
+
+df = df.withColumn("value", regexp_replace(df["value"], "\\?", ""))
+
+df.show(truncate=False)
+
+# Save the 'value' column without header to another JSON file
+df.select("value").write.json("cleaned_output.json")
+
+
+
+
+
+
+
+
+
+
+
 regexp_replace(corrupt_record, '\\\\?\"', '') AS corrupt_record
 
 
