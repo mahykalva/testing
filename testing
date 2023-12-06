@@ -3,9 +3,20 @@ from google.cloud import bigquery
 
 class BigQueryHandler:
     def __init__(self, project_id: str):
+        self._validate_project_id(project_id)
         self.project_id = project_id
         self.client = bigquery.Client(project=project_id)
         logging.basicConfig(level=logging.INFO)
+
+    def _validate_project_id(self, project_id):
+        if not project_id or not isinstance(project_id, str):
+            raise ValueError("Invalid project_id. Please provide a valid string.")
+
+    def _validate_dataset_table_names(self, dataset, table):
+        if not dataset or not isinstance(dataset, str):
+            raise ValueError("Invalid dataset name. Please provide a valid string.")
+        if table is not None and (not isinstance(table, str)):
+            raise ValueError("Invalid table name. Please provide a valid string.")
 
     def _dataset_exists(self, dataset_id):
         dataset_ref = self.client.dataset(dataset_id)
@@ -25,7 +36,17 @@ class BigQueryHandler:
         except Exception as e:
             return False
 
+    def _validate_set_values(self, set_values):
+        if not set_values or not isinstance(set_values, dict):
+            raise ValueError("Invalid set_values. Please provide a valid dictionary.")
+
+    def _validate_where_condition(self, where_condition):
+        if where_condition is not None and not isinstance(where_condition, str):
+            raise ValueError("Invalid where_condition. Please provide a valid string.")
+
     def get_remove_table(self, dataset: str, table: str):
+        self._validate_dataset_table_names(dataset, table)
+
         if self._table_exists(dataset, table):
             query = f'DROP TABLE `{self.project_id}.{dataset}.{table}`'
             self.client.query(query).result()
@@ -34,6 +55,8 @@ class BigQueryHandler:
             logging.warning(f'Table `{self.project_id}.{dataset}.{table}` does not exist.')
 
     def get_remove_dataset(self, dataset: str):
+        self._validate_dataset_table_names(dataset, None)
+
         if self._dataset_exists(dataset):
             query = f'DROP SCHEMA `{self.project_id}.{dataset}`'
             self.client.query(query).result()
@@ -42,6 +65,8 @@ class BigQueryHandler:
             logging.warning(f'Dataset `{self.project_id}.{dataset}` does not exist.')
 
     def get_delete_data(self, dataset: str, table: str, where_condition: str = None):
+        self._validate_dataset_table_names(dataset, table)
+
         if self._table_exists(dataset, table):
             if where_condition:
                 query = f"DELETE FROM `{self.project_id}.{dataset}.{table}` WHERE {where_condition}"
@@ -54,6 +79,10 @@ class BigQueryHandler:
             logging.warning(f'Table `{self.project_id}.{dataset}.{table}` does not exist. No data deleted.')
 
     def get_update_table_data(self, dataset: str, table: str, set_values: dict, where_condition: str = None):
+        self._validate_dataset_table_names(dataset, table)
+        self._validate_set_values(set_values)
+        self._validate_where_condition(where_condition)
+
         def format_value(value):
             return f"'{value}'" if isinstance(value, str) else value
 
@@ -74,6 +103,12 @@ class BigQueryHandler:
 
     def get_copy_table_data(self, from_dataset_name: str, from_table_name: str,
                             to_dataset_name: str, to_table_name: str, flag: str):
+        self._validate_dataset_table_names(from_dataset_name, from_table_name)
+        self._validate_dataset_table_names(to_dataset_name, to_table_name)
+
+        if not flag or not isinstance(flag, str) or flag.lower() not in ['t', 'a']:
+            raise ValueError("Invalid flag. Please provide 'T' for truncate or 'A' for append.")
+
         if not self._table_exists(from_dataset_name, from_table_name):
             logging.warning(f'Table `{self.project_id}.{from_dataset_name}.{from_table_name}` does not exist. No data copied.')
             return
@@ -99,11 +134,3 @@ class BigQueryHandler:
             logging.warning(f'Invalid flag {flag}. Pass T for truncate and A for Append data')
 
 
-# Example usage:
-project_id = "your_project_id"
-handler = BigQueryHandler(project_id)
-
-# Use the handler to call your functions with the required dataset and table names
-handler.get_remove_table("your_dataset", "your_table")
-handler.get_remove_dataset("your_dataset")
-# ... (call other functions as needed)
