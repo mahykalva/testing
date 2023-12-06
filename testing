@@ -1,159 +1,109 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import regexp_replace
-
-# Read in the data using spark.read.json()
-df = spark.read.text("sample.json").cache()
-df.show(truncate=False)
-
-df = df.withColumn("value", regexp_replace(df["value"], "\\?", ""))
-
-df.show(truncate=False)
-
-# Save the 'value' column without header to another JSON file
-df.select("value").write.json("cleaned_output.json")
-
-
-
-
-
-
-
-
-
-
-
-regexp_replace(corrupt_record, '\\\\?\"', '') AS corrupt_record
-
-
-
-
-
-
-can u try our framework with below code :
-
-{
-  "name": "T_PROV_COMMENT",
-  "input": [
-    {
-      "name": "T_PROV_COMMENT_cdc",
-      "format": "json",
-      "options": {
-        "inferSchema": false,
-        "mode": "PERMISSIVE",
-        "columnNameOfCorruptRecord": "corrupt_record"
-      },
-      "location":  "/test/incoming/raw/provider/ppw/cdc_fpi/gdbd/T_PROV_COMMENT"
-    }
-  ],
-  "analyze": [
-    {
-      "name": "T_PROV_COMMENT_corrupt",
-      "dataframes": [ "T_PROV_COMMENT_cdc" ],
-      "sql": [
-        "select REPLACE(corrupt_record, ':[\"\\']([^\"\\']*)[\"\\']', ':[\"\\']$1[\"\\']') AS corrupt_record from T_PROV_COMMENT_cdc where corrupt_record is NOT NULL"
-      ]
-    },
-    {
-      "name": "T_PROV_COMMENT_good",
-      "dataframes": [ "T_PROV_COMMENT_cdc" ],
-      "sql": [
-        "select *  from T_PROV_COMMENT_cdc where corrupt_record is NULL"
-      ]
-    }
-  ],
-  "output": [
-    {
-      "name": "T_PROV_COMMENT_GOOD_DATA",
-      "dataframe": "T_PROV_COMMENT_good",
-      "format": "json",
-      "mode": "overwrite",
-      "location": "/test/incoming/raw/provider/ppw/cdc_fpi/gdbd/T_PROV_COMMENT_good"
-    },
-    {
-      "name": "T_PROV_COMMENT_CORRUPT_DATA",
-      "dataframe": "T_PROV_COMMENT_corrupt",
-      "format": "json",
-      "mode": "overwrite",
-      "location": "/test/incoming/raw/provider/ppw/cdc_fpi/gdbd/T_PROV_COMMENT_corrupt"
-    }
-  ]
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Below is the sample code
-
-
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, lit, regexp_replace, when
-from pyspark.sql.types import StructType
-
-# Initialize a Spark session
-spark = SparkSession.builder.appName("JSONDataProcessing").getOrCreate()
-
-# Define the input JSON data
-json_data = [
-    '{"NAME":"JHON","COMMENT":"He is good person?"ijjjj?"jdjjd","AGE":"25"}',
-    '{"NAME":"KEN","COMMENT":"He is good person","AGE":"30"}'
-]
-
-# Create a DataFrame from the JSON data
-df = spark.read.json(spark.sparkContext.parallelize(json_data))
-
-# Identify rows with bad records in the _corrupt_record column
-df = df.withColumn("_corrupt_record", when(col("_corrupt_record").isNotNull(), col("_corrupt_record")))
-
-# Replace the pattern ?" in all columns
-for column in df.columns:
-    df = df.withColumn(column, regexp_replace(col(column), "\\?\"", ""))
-
-# Create a schema for parsing _corrupt_record
-corrupt_schema = StructType()
-
-# Merge good records with bad records dynamically
-merged_df = df.withColumn("merged_data", when(col("_corrupt_record").isNotNull(),
-                                               from_json(col("_corrupt_record"), corrupt_schema))
-                          .otherwise(lit(None)))
-
-# Select the relevant columns
-merged_df = merged_df.select(*df.columns)
-
-# Show the resulting DataFrame
-merged_df.show(truncate=False)
+import logging
+from google.cloud import bigquery
+
+class BigQueryHandler:
+    def __init__(self, project_id: str):
+        self.project_id = project_id
+        self.client = bigquery.Client(project=project_id)
+        logging.basicConfig(level=logging.INFO)
+
+    def _dataset_exists(self, dataset_id):
+        dataset_ref = self.client.dataset(dataset_id)
+        try:
+            self.client.get_dataset(dataset_ref)
+            return True
+        except Exception as e:
+            return False
+
+    def _table_exists(self, dataset_id, table_id):
+        dataset_ref = self.client.dataset(dataset_id)
+        table_ref = dataset_ref.table(table_id)
+
+        try:
+            self.client.get_table(table_ref)
+            return True
+        except Exception as e:
+            return False
+
+    def get_remove_table(self, dataset: str, table: str):
+        if self._table_exists(dataset, table):
+            query = f'DROP TABLE `{self.project_id}.{dataset}.{table}`'
+            self.client.query(query).result()
+            logging.info(f'Table `{self.project_id}.{dataset}.{table}` removed successfully.')
+        else:
+            logging.warning(f'Table `{self.project_id}.{dataset}.{table}` does not exist.')
+
+    def get_remove_dataset(self, dataset: str):
+        if self._dataset_exists(dataset):
+            query = f'DROP SCHEMA `{self.project_id}.{dataset}`'
+            self.client.query(query).result()
+            logging.info(f'Dataset `{self.project_id}.{dataset}` removed successfully.')
+        else:
+            logging.warning(f'Dataset `{self.project_id}.{dataset}` does not exist.')
+
+    def get_delete_data(self, dataset: str, table: str, where_condition: str = None):
+        if self._table_exists(dataset, table):
+            if where_condition:
+                query = f"DELETE FROM `{self.project_id}.{dataset}.{table}` WHERE {where_condition}"
+            else:
+                query = f"DELETE FROM `{self.project_id}.{dataset}.{table}` WHERE TRUE"
+
+            self.client.query(query).result()
+            logging.info(f'Data deleted from `{self.project_id}.{dataset}.{table}`.')
+        else:
+            logging.warning(f'Table `{self.project_id}.{dataset}.{table}` does not exist. No data deleted.')
+
+    def get_update_table_data(self, dataset: str, table: str, set_values: dict, where_condition: str = None):
+        def format_value(value):
+            return f"'{value}'" if isinstance(value, str) else value
+
+        set_clause = ', '.join([f'{column} = {format_value(value)}' for column, value in set_values.items()])
+        where_clause = f'WHERE {where_condition}' if where_condition else ''
+
+        sql_query = f"""
+                UPDATE `{self.project_id}.{dataset}.{table}`
+                SET {set_clause}
+                {where_clause}
+            """
+        logging.info(sql_query)
+        if self._table_exists(dataset, table):
+            self.client.query(sql_query).result()
+            logging.info(f'Data Updated from `{self.project_id}.{dataset}.{table}`.')
+        else:
+            logging.warning(f'Table `{self.project_id}.{dataset}.{table}` does not exist. No data updated.')
+
+    def get_copy_table_data(self, from_dataset_name: str, from_table_name: str,
+                            to_dataset_name: str, to_table_name: str, flag: str):
+        if not self._table_exists(from_dataset_name, from_table_name):
+            logging.warning(f'Table `{self.project_id}.{from_dataset_name}.{from_table_name}` does not exist. No data copied.')
+            return
+
+        if not self._table_exists(to_dataset_name, to_table_name):
+            logging.warning(f'Table `{self.project_id}.{to_dataset_name}.{to_table_name}` does not exist. No data copied.')
+            return
+
+        if flag.lower() == 't':
+            truncate_query = f"TRUNCATE TABLE `{self.project_id}.{to_dataset_name}.{to_table_name}`"
+            self.client.query(truncate_query).result()
+            logging.info(f'Table `{self.project_id}.{to_dataset_name}.{to_table_name}` truncated successfully.')
+
+        if flag.lower() in ['t', 'a']:
+            sql_query = f"""
+                INSERT INTO `{self.project_id}.{to_dataset_name}.{to_table_name}`
+                SELECT * FROM `{self.project_id}.{from_dataset_name}.{from_table_name}`
+            """
+            query_job = self.client.query(sql_query)
+            query_job.result()
+            logging.info(f'Data copied from `{self.project_id}.{from_dataset_name}.{from_table_name}` to `{self.project_id}.{to_dataset_name}.{to_table_name}`.')
+        else:
+            logging.warning(f'Invalid flag {flag}. Pass T for truncate and A for Append data')
+
+
+# Example usage:
+project_id = "your_project_id"
+handler = BigQueryHandler(project_id)
+
+# Use the handler to call your functions with the required dataset and table names
+handler.get_remove_table("your_dataset", "your_table")
+handler.get_remove_dataset("your_dataset")
+# ... (call other functions as needed)
