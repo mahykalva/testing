@@ -1,253 +1,286 @@
+from datetime import datetime, timedelta
+from datetime import datetime
+import pytz
+# from google.cloud import storage
+# from google.cloud import bigquery
+from airflow.contrib.operators.bigquery_operator import BigQueryOperator
+from airflow.operators import python_operator
+from airflow.contrib.operators import bigquery_operator
+import pendulum
+import sys
 import logging
-from google.cloud import bigquery
+import os
+from hooks.batch_process import batch_control
+from operators.bigquery_load_operator import BIGQUERY_LOAD
 
-class BigQueryHandler:
+from operators.data_validation import data_validations
+from airflow import DAG
+from airflow.utils.module_loading import import_string
+from importlib import import_module
+from lib.service_now import trigger_servicenow
+from hooks.bq_utils import bq_util
+from hooks.file_utils import file_util
+from hooks.gcs_utils import gcs_util
+
+def Extracts_days_for_batch(stage, process_nm, schedule_cd, cost_label, dag_id, **kwargs):
     """
-    A class to handle BigQuery operations using the Google Cloud BigQuery Python client library.
+    Extracts batch dates and other information and pushes them to XCOM for downstream tasks.
 
     Parameters:
-    - project_id (str): The ID of the Google Cloud project.
+    - stage (str): The stage of the batch process.
+    - process_nm (str): The name of the batch process.
+    - schedule_cd (str): The schedule code for the batch process.
+    - cost_label (str): The cost label for the batch process.
+    - dag_id (str): The ID of the Directed Acyclic Graph (DAG) associated with the batch process.
+    - **kwargs: Additional keyword arguments, including 'ti' and other task-specific parameters.
 
-    Methods:
-    - get_remove_table: Remove a BigQuery table.
-    - get_remove_dataset: Remove a BigQuery dataset.
-    - get_delete_data: Delete data from a BigQuery table.
-    - get_update_table_data: Update data in a BigQuery table.
-    - get_copy_table_data: Copy data from one BigQuery table to another.
+    Returns:
+    None
     """
+    # Extracting batch information
+    print('Version:', kwargs['ti'].xcom_pull(task_ids='get_RegReportVersion')[0])
+    process_desc = kwargs['ti'].xcom_pull(task_ids='get_RegReportVersion')[0]
+    batch_control_ob = batch_control(process_nm, process_desc, schedule_cd, cost_label)
 
-    def __init__(self, project_id: str):
-        """
-        Initialize the BigQueryHandler.
+    from_dt_batch, to_dt_batch, cost_label_batch = batch_control_ob.batch_operations(stage)
 
-        Parameters:
-        - project_id (str): The ID of the Google Cloud project.
-        """
-        self._validate_project_id(project_id)
-        self.project_id = project_id
-        self.client = bigquery.Client(project=project_id)
-        logging.basicConfig(level=logging.INFO)
+    cost_label_dict = {'cost_category': cost_label_batch, 'dag': dag_id}
 
-    def _validate_project_id(self, project_id):
-        """
-        Validate the project ID.
+    # Formatting date and time
+    from_date_dash = from_dt_batch.split()[0]
+    to_date_dash = to_dt_batch.split()[0]
+    from_date_no_dash = from_dt_batch.split(' ')[0].replace("-", "")
+    to_date_no_dash = to_dt_batch.split(' ')[0].replace("-", "")
 
-        Parameters:
-        - project_id (str): The project ID to validate.
+    cst_timezone = pytz.timezone('America/Chicago')
+    fmt = '%Y-%m-%d %H:%M:%S'
+    utc_end_time = datetime.strptime(to_dt_batch, fmt).replace(tzinfo=pytz.utc)
+    utc_start_time = datetime.strptime(from_dt_batch, fmt).replace(tzinfo=pytz.utc)
+    cst_end_time = utc_end_time.astimezone(cst_timezone).strftime(fmt)
+    cst_start_time = utc_start_time.astimezone(cst_timezone).strftime(fmt)
 
-        Raises:
-        - ValueError: If the project ID is not a valid string.
-        """
-        if not project_id or not isinstance(project_id, str):
-            raise ValueError("Invalid project_id. Please provide a valid string.")
+    # Pushing the batch dates to XCOM to be used for downstream tasks
+    task_instance = kwargs['task_instance']
+    task_instance.xcom_push(key="cost_label", value=cost_label_dict)
+    task_instance.xcom_push(key="from_date", value=from_date_no_dash)
+    task_instance.xcom_push(key="to_date", value=to_date_no_dash)
+    task_instance.xcom_push(key="from_date_dash", value=from_date_dash)
+    task_instance.xcom_push(key="to_date_dash", value=to_date_dash)
+    task_instance.xcom_push(key="to_date_cst", value=cst_end_time)
+    task_instance.xcom_push(key="from_date_cst", value=cst_start_time)
 
-    def _validate_dataset_table_names(self, dataset, table):
-        """
-        Validate the dataset and table names.
 
-        Parameters:
-        - dataset (str): The name of the BigQuery dataset.
-        - table (str): The name of the BigQuery table.
 
-        Raises:
-        - ValueError: If the dataset or table name is not a valid string.
-        """
-        if not dataset or not isinstance(dataset, str):
-            raise ValueError("Invalid dataset name. Please provide a valid string.")
-        if table is not None and (not isinstance(table, str)):
-            raise ValueError("Invalid table name. Please provide a valid string.")
+def load_report_version(report_name, current_year, curr_quarter, report_dataset, rr_version, DAG, BQ_CONN_ID, Load_Report_Version, **kwargs):
+    """
+    Loads the version of a report into BigQuery with additional metadata.
 
-    def _dataset_exists(self, dataset_id):
-        """
-        Check if a BigQuery dataset exists.
+    Parameters:
+    - report_name (str): The name of the report.
+    - current_year (str): The current year.
+    - curr_quarter (str): The current quarter.
+    - report_dataset (str): The dataset where the report version will be stored.
+    - rr_version (str): The version of the report.
+    - DAG: The Directed Acyclic Graph associated with the task.
+    - BQ_CONN_ID (str): The BigQuery connection ID.
+    - Load_Report_Version (str): The path to the SQL file for loading report versions.
+    - **kwargs: Additional keyword arguments, including 'ts' and other task-specific parameters.
 
-        Parameters:
-        - dataset_id (str): The ID of the BigQuery dataset.
+    Returns:
+    None
+    """
+    CurrentDateTime = kwargs['ts']
+    VersionSourceCode = "{}-{}-{};{}".format(report_name, current_year, curr_quarter, CurrentDateTime).replace("T", " ")
 
-        Returns:
-        - bool: True if the dataset exists, False otherwise.
-        """
-        dataset_ref = self.client.dataset(dataset_id)
-        try:
-            self.client.get_dataset(dataset_ref)
-            return True
-        except Exception as e:
-            return False
+    print(VersionSourceCode)
 
-    def _table_exists(self, dataset_id, table_id):
-        """
-        Check if a BigQuery table exists.
+    sql_script = read_SQL_file(Load_Report_Version)
+    sql_base = '{}'.format(sql_script)
 
-        Parameters:
-        - dataset_id (str): The ID of the BigQuery dataset.
-        - table_id (str): The ID of the BigQuery table.
+    run_rep_version = BigQueryOperator(
+        task_id="Report_Version",
+        sql=sql_base.format(report_dataset=report_dataset, rr_version=rr_version),
+        destination_dataset_table=f"{report_dataset}.{rr_version}",
+        query_params=[
+            {'name': "CreateTimestamp",
+             'parameterType': {'type': "STRING"},
+             'parameterValue': {'value': CurrentDateTime}
+             },
+            {'name': "VersionSourceCode",
+             'parameterType': {'type': "STRING"},
+             'parameterValue': {'value': VersionSourceCode}
+             },
+            {'name': "ReportYear",
+             'parameterType': {'type': "STRING"},
+             'parameterValue': {'value': current_year}
+             },
+            {'name': "ReportPeriod",
+             'parameterType': {'type': "STRING"},
+             'parameterValue': {'value': curr_quarter}
+             },
+            {'name': "report",
+             'parameterType': {'type': "STRING"},
+             'parameterValue': {'value': report_name}
+             }],
+        write_disposition='WRITE_APPEND',
+        create_disposition='CREATE_NEVER',
+        allow_large_results=True,
+        use_legacy_sql=False,
+        bigquery_conn_id=BQ_CONN_ID,
+        execution_timeout=timedelta(minutes=30),
+        retries=3,
+        retry_delay=timedelta(minutes=1),
+        dag=DAG
+    )
 
-        Returns:
-        - bool: True if the table exists, False otherwise.
-        """
-        dataset_ref = self.client.dataset(dataset_id)
-        table_ref = dataset_ref.table(table_id)
+    run_rep_version.execute(context=kwargs)
 
-        try:
-            self.client.get_table(table_ref)
-            return True
-        except Exception as e:
-            return False
 
-    def _validate_set_values(self, set_values):
-        """
-        Validate the set_values parameter for update operation.
+def reg_report_version_create(report_name, rr_version, BQ_PROJECT, Report_Version_Create):
+    """
+    Creates a registration version for a report in BigQuery.
 
-        Parameters:
-        - set_values (dict): A dictionary where keys are column names and values are the new values to set.
+    Parameters:
+    - report_name (str): The name of the report.
+    - rr_version (str): The version of the report.
+    - BQ_PROJECT (str): The BigQuery project ID.
+    - Report_Version_Create (str): The path to the SQL file for creating report versions.
 
-        Raises:
-        - ValueError: If set_values is not a valid dictionary.
-        """
-        if not set_values or not isinstance(set_values, dict):
-            raise ValueError("Invalid set_values. Please provide a valid dictionary.")
+    Returns:
+    list: A list containing the result of the query for the created registration version.
+    """
+    client = bigquery.Client(project=BQ_PROJECT)
+    sql_script = read_SQL_file(Report_Version_Create)
+    sql_base = '{}'.format(sql_script)
+    sql = sql_base.format(ReportName=report_name, rr_version=rr_version)
 
-    def _validate_where_condition(self, where_condition):
-        """
-        Validate the where_condition parameter for delete and update operations.
+    query_RegReportVersion = client.query(sql)
+    result_query_RegReportVersion = query_RegReportVersion.result()
 
-        Parameters:
-        - where_condition (str): The WHERE clause condition.
+    for row in result_query_RegReportVersion:
+        return list(row)
 
-        Raises:
-        - ValueError: If where_condition is not a valid string.
-        """
-        if where_condition is not None and not isinstance(where_condition, str):
-            raise ValueError("Invalid where_condition. Please provide a valid string.")
 
-    def get_remove_table(self, dataset: str, table: str):
-        """
-        Remove a BigQuery table.
+from datetime import datetime
+from airflow.models import DAG
+from your_module import BIGQUERY_LOAD  # Import BIGQUERY_LOAD from your module
 
-        Parameters:
-        - dataset (str): The name of the BigQuery dataset.
-        - table (str): The name of the BigQuery table.
-        """
-        self._validate_dataset_table_names(dataset, table)
+def load_table(rr_dataset, LOAD_SQL_DIR, table_name, current_year, curr_quarter, DAG, ENV, **kwargs):
+    """
+    Loads data into a table in BigQuery with specified parameters.
 
-        if self._table_exists(dataset, table):
-            query = f'DROP TABLE `{self.project_id}.{dataset}.{table}`'
-            self.client.query(query).result()
-            logging.info(f'Table `{self.project_id}.{dataset}.{table}` removed successfully.')
-        else:
-            logging.warning(f'Table `{self.project_id}.{dataset}.{table}` does not exist.')
+    Parameters:
+    - rr_dataset (str): The target BigQuery dataset.
+    - LOAD_SQL_DIR (str): The directory containing the SQL file for loading data.
+    - table_name (str): The name of the target table.
+    - current_year (str): The current year.
+    - curr_quarter (str): The current quarter.
+    - DAG: The Directed Acyclic Graph associated with the task.
+    - ENV (str): The project environment.
+    - **kwargs: Additional keyword arguments, including 'ts' and other task-specific parameters.
 
-    def get_remove_dataset(self, dataset: str):
-        """
-        Remove a BigQuery dataset.
+    Returns:
+    None
+    """
+    LOAD_START_DATE = kwargs['ti'].xcom_pull(task_ids='Extracts_dates_for_yearly_batch', key='from_date_dash')
+    LOAD_END_DATE = kwargs['ti'].xcom_pull(task_ids='Extracts_dates_for_yearly_batch', key='to_date_dash')
+    RegReportVersion = kwargs['ti'].xcom_pull(task_ids='get_RegReportVersion')[0]
+    ReportPeriod = curr_quarter
+    ReportYear = str(current_year)
+    CreateDateTime = str(kwargs['ts']).split("+")[0].replace("T", " ")
+    UpdateDateTime = str(kwargs['ts']).split("+")[0].replace("T", " ")
 
-        Parameters:
-        - dataset (str): The name of the BigQuery dataset.
-        """
-        self._validate_dataset_table_names(dataset, None)
+    table_load = BIGQUERY_LOAD(
+        task_id="Load_table_id",
+        TGT_BQ_DATASET=rr_dataset,
+        TGT_BQ_OBJ_NAME=table_name,
+        SQL_FILE_DIR='',
+        LOAD_START_DATE=LOAD_START_DATE,
+        LOAD_END_DATE=LOAD_END_DATE,
+        VARIABLES_TO_REPLACE={
+            'from_date': LOAD_START_DATE,
+            'to_date': LOAD_END_DATE,
+            'RRVer': RegReportVersion,
+            'RepPeriod': ReportPeriod,
+            'RepYear': ReportYear,
+            'Create_DateTime': CreateDateTime,
+            'Update_DateTime': UpdateDateTime,
+            'project_env': ENV
+        },
+        LOAD_SQL_DIR=LOAD_SQL_DIR,
+        dag=DAG
+    )
 
-        if self._dataset_exists(dataset):
-            query = f'DROP SCHEMA `{self.project_id}.{dataset}`'
-            self.client.query(query).result()
-            logging.info(f'Dataset `{self.project_id}.{dataset}` removed successfully.')
-        else:
-            logging.warning(f'Dataset `{self.project_id}.{dataset}` does not exist.')
+    table_load.execute(context=kwargs)
 
-    def get_delete_data(self, dataset: str, table: str, where_condition: str = None):
-        """
-        Delete data from a BigQuery table.
 
-        Parameters:
-        - dataset (str): The name of the BigQuery dataset.
-        - table (str): The name of the BigQuery table.
-        - where_condition (str, optional): Optional WHERE clause condition for deletion.
-        """
-        self._validate_dataset_table_names(dataset, table)
+from your_module import data_validations  # Import data_validations from your module
 
-        if self._table_exists(dataset, table):
-            if where_condition:
-                query = f"DELETE FROM `{self.project_id}.{dataset}.{table}` WHERE {where_condition}"
-            else:
-                query = f"DELETE FROM `{self.project_id}.{dataset}.{table}` WHERE TRUE"
+def checkout(DQ_SQL_FILE, checkout_array_name, DAG, ENV, **kwargs):
+    """
+    Performs a checkout using data validations with specified parameters.
 
-            self.client.query(query).result()
-            logging.info(f'Data deleted from `{self.project_id}.{dataset}.{table}`.')
-        else:
-            logging.warning(f'Table `{self.project_id}.{dataset}.{table}` does not exist. No data deleted.')
+    Parameters:
+    - DQ_SQL_FILE (str): The SQL file for data validations.
+    - checkout_array_name (str): The name of the checkout array.
+    - DAG: The Directed Acyclic Graph associated with the task.
+    - ENV (str): The project environment.
+    - **kwargs: Additional keyword arguments, including 'ts' and other task-specific parameters.
 
-    def get_update_table_data(self, dataset: str, table: str, set_values: dict, where_condition: str = None):
-        """
-        Update data in a BigQuery table.
+    Returns:
+    None
+    """
+    RegReportVersion = kwargs['ti'].xcom_pull(task_ids='get_RegReportVersion')[0]
+    LOAD_START_DATE = kwargs['ti'].xcom_pull(task_ids='Extracts_dates_for_yearly_batch', key='from_date_dash')
+    LOAD_END_DATE = kwargs['ti'].xcom_pull(task_ids='Extracts_dates_for_yearly_batch', key='to_date_dash')
 
-        Parameters:
-        - dataset (str): The name of the BigQuery dataset.
-        - table (str): The name of the BigQuery table.
-        - set_values (dict): A dictionary where keys are column names and values are the new values to set.
-        - where_condition (str, optional): WHERE condition to specify which rows to update. If None, all rows will be updated.
-        """
-        self._validate_dataset_table_names(dataset, table)
-        self._validate_set_values(set_values)
-        self._validate_where_condition(where_condition)
+    CHECKOUT_ENTRY = data_validations(
+        task_id="Checkout_id",
+        DQ_SQL_FILE=DQ_SQL_FILE,
+        load_batch_name="",
+        checkout_array_name=checkout_array_name,
+        load_start_date=LOAD_START_DATE,
+        load_end_date=LOAD_END_DATE,
+        checkout_variables_to_replace={
+            'RRVer': RegReportVersion,
+            'from_date': LOAD_START_DATE,
+            'to_date': LOAD_END_DATE,
+            'project_env': ENV
+        },
+        exit_criteria='error',
+        dag=DAG
+    )
 
-        def format_value(value):
-            return f"'{value}'" if isinstance(value, str) else value
+    CHECKOUT_ENTRY.execute(context=kwargs)
 
-        set_clause = ', '.join([f'{column} = {format_value(value)}' for column, value in set_values.items()])
-        where_clause = f'WHERE {where_condition}' if where_condition else ''
 
-        sql_query = f"""
-                UPDATE `{self.project_id}.{dataset}.{table}`
-                SET {set_clause}
-                {where_clause}
-            """
-        logging.info(sql_query)
-        if self._table_exists(dataset, table):
-            self.client.query(sql_query).result()
-            logging.info(f'Data Updated from `{self.project_id}.{dataset}.{table}`.')
-        else:
-            logging.warning(f'Table `{self.project_id}.{dataset}.{table}` does not exist. No data updated.')
+def export_data(FILEGEN_SQL_DIR, report_name, file_extension, bucket_name, project_id, **kwargs):
+    """
+    Export data to Google Cloud Storage with specified parameters.
 
-    def get_copy_table_data(self, from_dataset_name: str, from_table_name: str,
-                            to_dataset_name: str, to_table_name: str, flag: str):
-        """
-        Copy data from one BigQuery table to another.
+    Parameters:
+    - FILEGEN_SQL_DIR (str): The directory containing SQL files for data export.
+    - report_name (str): The name of the report.
+    - file_extension (str): The file extension to be used for the exported file.
+    - bucket_name (str): The name of the Google Cloud Storage bucket.
+    - project_id (str): The ID of the Google Cloud project.
+    - **kwargs: Additional keyword arguments, including 'ts' and other task-specific parameters.
 
-        Parameters:
-        - from_dataset_name (str): The name of the source BigQuery dataset.
-        - from_table_name (str): The name of the source BigQuery table.
-        - to_dataset_name (str): The name of the destination BigQuery dataset.
-        - to_table_name (str): The name of the destination BigQuery table.
-        - flag (str): Flag to specify whether to truncate ('T') or append ('A') data.
+    Returns:
+    None
+    """
+    bq_operations = bq_util()
+    file_operations = file_util()
+    gcs_operations = gcs_util()
 
-        Raises:
-        - ValueError: If flag is not 'T' for truncate or 'A' for append.
-        """
-        self._validate_dataset_table_names(from_dataset_name, from_table_name)
-        self._validate_dataset_table_names(to_dataset_name, to_table_name)
+    for file in os.listdir(FILEGEN_SQL_DIR):
+        prefix = f"{report_name}/{file}{file_extension}"
+        
+        # Read SQL file
+        sql_query = file_operations.read_sql_file(os.path.join(FILEGEN_SQL_DIR, file))
 
-        if not flag or not isinstance(flag, str) or flag.lower() not in ['t', 'a']:
-            raise ValueError("Invalid flag. Please provide 'T' for truncate or 'A' for append.")
+        # Run SQL query in BigQuery
+        sql_bq_load = bq_operations.run_query(sql_query)
 
-        if not self._table_exists(from_dataset_name, from_table_name):
-            logging.warning(f'Table `{self.project_id}.{from_dataset_name}.{from_table_name}` does not exist. No data copied.')
-            return
-
-        if not self._table_exists(to_dataset_name, to_table_name):
-            logging.warning(f'Table `{self.project_id}.{to_dataset_name}.{to_table_name}` does not exist. No data copied.')
-            return
-
-        if flag.lower() == 't':
-            truncate_query = f"TRUNCATE TABLE `{self.project_id}.{to_dataset_name}.{to_table_name}`"
-            self.client.query(truncate_query).result()
-            logging.info(f'Table `{self.project_id}.{to_dataset_name}.{to_table_name}` truncated successfully.')
-
-        if flag.lower() in ['t', 'a']:
-            sql_query = f"""
-                INSERT INTO `{self.project_id}.{to_dataset_name}.{to_table_name}`
-                SELECT * FROM `{self.project_id}.{from_dataset_name}.{from_table_name}`
-            """
-            query_job = self.client.query(sql_query)
-            query_job.result()
-            logging.info(f'Data copied from `{self.project_id}.{from_dataset_name}.{from_table_name}` to `{self.project_id}.{to_dataset_name}.{to_table_name}`.')
-        else:
-            logging.warning(f'Invalid flag {flag}. Pass T for truncate and A for Append data')
+        # Upload result to Google Cloud Storage
+        uploaded_file = gcs_operations.upload_payload_storage(project_id, bucket_name, prefix, sql_bq_load)
