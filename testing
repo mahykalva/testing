@@ -3,6 +3,21 @@
 from datetime import datetime, timedelta
 from airflow.contrib.operators.bigquery_operator import BigQueryOperator
 import pendulum
+import pytz
+
+# Variables
+local_tz = pendulum.timezone("America/Chicago")
+DefaultTimezone = 'US/Central'
+tz = pytz.timezone(DefaultTimezone)
+current_date = datetime.now().astimezone(tz)
+current_date_UTC = datetime.utcnow()
+current_date_UTC_midnight = current_date_UTC.replace(hour=0, minute=0, second=0, microsecond=0)
+Prev_date_UTC_before_midnight = current_date_UTC_midnight + timedelta(milliseconds=-1)
+timestamp = str(Prev_date_UTC_before_midnight)
+tz_time = pytz.timezone(DefaultTimezone)
+current_date = datetime.now().astimezone(tz_time)
+current_year = Prev_date_UTC_before_midnight.year
+curr_quarter = 'Q' + str(int((Prev_date_UTC_before_midnight.month - 1) / 3 + 1))
 
 class MyLibrary:
     """A library for common functions used in Airflow DAGs."""
