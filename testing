@@ -1,286 +1,91 @@
+# my_library.py
+
 from datetime import datetime, timedelta
-from datetime import datetime
-import pytz
-# from google.cloud import storage
-# from google.cloud import bigquery
 from airflow.contrib.operators.bigquery_operator import BigQueryOperator
-from airflow.operators import python_operator
-from airflow.contrib.operators import bigquery_operator
 import pendulum
-import sys
-import logging
-import os
-from hooks.batch_process import batch_control
-from operators.bigquery_load_operator import BIGQUERY_LOAD
 
-from operators.data_validation import data_validations
-from airflow import DAG
-from airflow.utils.module_loading import import_string
-from importlib import import_module
-from lib.service_now import trigger_servicenow
-from hooks.bq_utils import bq_util
-from hooks.file_utils import file_util
-from hooks.gcs_utils import gcs_util
+class MyLibrary:
+    """A library for common functions used in Airflow DAGs."""
 
-def Extracts_days_for_batch(stage, process_nm, schedule_cd, cost_label, dag_id, **kwargs):
-    """
-    Extracts batch dates and other information and pushes them to XCOM for downstream tasks.
+    def __init__(self):
+        """Initialize the library."""
+        pass
 
-    Parameters:
-    - stage (str): The stage of the batch process.
-    - process_nm (str): The name of the batch process.
-    - schedule_cd (str): The schedule code for the batch process.
-    - cost_label (str): The cost label for the batch process.
-    - dag_id (str): The ID of the Directed Acyclic Graph (DAG) associated with the batch process.
-    - **kwargs: Additional keyword arguments, including 'ti' and other task-specific parameters.
+    @staticmethod
+    def load_report_version(report_name, current_year, curr_quarter, report_dataset, rr_version, Load_Report_Version, BQ_CONN_ID, DAG, **kwargs):
+        """
+        Load the report version into BigQuery.
 
-    Returns:
-    None
-    """
-    # Extracting batch information
-    print('Version:', kwargs['ti'].xcom_pull(task_ids='get_RegReportVersion')[0])
-    process_desc = kwargs['ti'].xcom_pull(task_ids='get_RegReportVersion')[0]
-    batch_control_ob = batch_control(process_nm, process_desc, schedule_cd, cost_label)
+        Args:
+            report_name (str): Name of the report.
+            current_year (int): Current year.
+            curr_quarter (str): Current quarter.
+            report_dataset (str): BigQuery dataset for reports.
+            rr_version (str): BigQuery table for report versions.
+            Load_Report_Version (str): Path to the SQL file for loading report versions.
+            BQ_CONN_ID (str): BigQuery connection ID.
+            DAG (airflow.DAG): The DAG instance.
+            **kwargs: Additional keyword arguments passed by Airflow.
 
-    from_dt_batch, to_dt_batch, cost_label_batch = batch_control_ob.batch_operations(stage)
+        Returns:
+            None
+        """
+        current_date = datetime.now(pendulum.timezone("America/Chicago"))
+        CurrentDateTime = kwargs['ts']
+        VersionSourceCode = "{}-{}-{};{}".format(report_name, current_year, curr_quarter, CurrentDateTime).replace("T", " ")
+        print(VersionSourceCode)
 
-    cost_label_dict = {'cost_category': cost_label_batch, 'dag': dag_id}
+        sql_script = MyLibrary.read_SQL_file(Load_Report_Version)
+        sql_base = '{}'.format(sql_script)
 
-    # Formatting date and time
-    from_date_dash = from_dt_batch.split()[0]
-    to_date_dash = to_dt_batch.split()[0]
-    from_date_no_dash = from_dt_batch.split(' ')[0].replace("-", "")
-    to_date_no_dash = to_dt_batch.split(' ')[0].replace("-", "")
+        run_rep_version = BigQueryOperator(
+            task_id="Report_Version",
+            sql=sql_base.format(report_dataset=report_dataset, rr_version=rr_version),
+            destination_dataset_table=f"{report_dataset}.{rr_version}",
+            query_params=[
+                {'name': "CreateTimestamp",
+                 'parameterType': {'type': "STRING"},
+                 'parameterValue': {'value': CurrentDateTime}
+                 },
+                {'name': "VersionSourceCode",
+                 'parameterType': {'type': "STRING"},
+                 'parameterValue': {'value': VersionSourceCode}
+                 },
+                {'name': "ReportYear",
+                 'parameterType': {'type': "STRING"},
+                 'parameterValue': {'value': current_year}
+                 },
+                {'name': "ReportPeriod",
+                 'parameterType': {'type': "STRING"},
+                 'parameterValue': {'value': curr_quarter}
+                 },
+                {'name': "report",
+                 'parameterType': {'type': "STRING"},
+                 'parameterValue': {'value': report_name}
+                 }],
+            write_disposition='WRITE_APPEND',
+            create_disposition='CREATE_NEVER',
+            allow_large_results=True,
+            use_legacy_sql=False,
+            bigquery_conn_id=BQ_CONN_ID,
+            execution_timeout=timedelta(minutes=30),
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            dag=DAG
+        )
 
-    cst_timezone = pytz.timezone('America/Chicago')
-    fmt = '%Y-%m-%d %H:%M:%S'
-    utc_end_time = datetime.strptime(to_dt_batch, fmt).replace(tzinfo=pytz.utc)
-    utc_start_time = datetime.strptime(from_dt_batch, fmt).replace(tzinfo=pytz.utc)
-    cst_end_time = utc_end_time.astimezone(cst_timezone).strftime(fmt)
-    cst_start_time = utc_start_time.astimezone(cst_timezone).strftime(fmt)
+        run_rep_version.execute(context=kwargs)
 
-    # Pushing the batch dates to XCOM to be used for downstream tasks
-    task_instance = kwargs['task_instance']
-    task_instance.xcom_push(key="cost_label", value=cost_label_dict)
-    task_instance.xcom_push(key="from_date", value=from_date_no_dash)
-    task_instance.xcom_push(key="to_date", value=to_date_no_dash)
-    task_instance.xcom_push(key="from_date_dash", value=from_date_dash)
-    task_instance.xcom_push(key="to_date_dash", value=to_date_dash)
-    task_instance.xcom_push(key="to_date_cst", value=cst_end_time)
-    task_instance.xcom_push(key="from_date_cst", value=cst_start_time)
+    @staticmethod
+    def read_SQL_file(file_path):
+        """
+        Read the content of an SQL file.
 
+        Args:
+            file_path (str): Path to the SQL file.
 
-
-def load_report_version(report_name, current_year, curr_quarter, report_dataset, rr_version, DAG, BQ_CONN_ID, Load_Report_Version, **kwargs):
-    """
-    Loads the version of a report into BigQuery with additional metadata.
-
-    Parameters:
-    - report_name (str): The name of the report.
-    - current_year (str): The current year.
-    - curr_quarter (str): The current quarter.
-    - report_dataset (str): The dataset where the report version will be stored.
-    - rr_version (str): The version of the report.
-    - DAG: The Directed Acyclic Graph associated with the task.
-    - BQ_CONN_ID (str): The BigQuery connection ID.
-    - Load_Report_Version (str): The path to the SQL file for loading report versions.
-    - **kwargs: Additional keyword arguments, including 'ts' and other task-specific parameters.
-
-    Returns:
-    None
-    """
-    CurrentDateTime = kwargs['ts']
-    VersionSourceCode = "{}-{}-{};{}".format(report_name, current_year, curr_quarter, CurrentDateTime).replace("T", " ")
-
-    print(VersionSourceCode)
-
-    sql_script = read_SQL_file(Load_Report_Version)
-    sql_base = '{}'.format(sql_script)
-
-    run_rep_version = BigQueryOperator(
-        task_id="Report_Version",
-        sql=sql_base.format(report_dataset=report_dataset, rr_version=rr_version),
-        destination_dataset_table=f"{report_dataset}.{rr_version}",
-        query_params=[
-            {'name': "CreateTimestamp",
-             'parameterType': {'type': "STRING"},
-             'parameterValue': {'value': CurrentDateTime}
-             },
-            {'name': "VersionSourceCode",
-             'parameterType': {'type': "STRING"},
-             'parameterValue': {'value': VersionSourceCode}
-             },
-            {'name': "ReportYear",
-             'parameterType': {'type': "STRING"},
-             'parameterValue': {'value': current_year}
-             },
-            {'name': "ReportPeriod",
-             'parameterType': {'type': "STRING"},
-             'parameterValue': {'value': curr_quarter}
-             },
-            {'name': "report",
-             'parameterType': {'type': "STRING"},
-             'parameterValue': {'value': report_name}
-             }],
-        write_disposition='WRITE_APPEND',
-        create_disposition='CREATE_NEVER',
-        allow_large_results=True,
-        use_legacy_sql=False,
-        bigquery_conn_id=BQ_CONN_ID,
-        execution_timeout=timedelta(minutes=30),
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        dag=DAG
-    )
-
-    run_rep_version.execute(context=kwargs)
-
-
-def reg_report_version_create(report_name, rr_version, BQ_PROJECT, Report_Version_Create):
-    """
-    Creates a registration version for a report in BigQuery.
-
-    Parameters:
-    - report_name (str): The name of the report.
-    - rr_version (str): The version of the report.
-    - BQ_PROJECT (str): The BigQuery project ID.
-    - Report_Version_Create (str): The path to the SQL file for creating report versions.
-
-    Returns:
-    list: A list containing the result of the query for the created registration version.
-    """
-    client = bigquery.Client(project=BQ_PROJECT)
-    sql_script = read_SQL_file(Report_Version_Create)
-    sql_base = '{}'.format(sql_script)
-    sql = sql_base.format(ReportName=report_name, rr_version=rr_version)
-
-    query_RegReportVersion = client.query(sql)
-    result_query_RegReportVersion = query_RegReportVersion.result()
-
-    for row in result_query_RegReportVersion:
-        return list(row)
-
-
-from datetime import datetime
-from airflow.models import DAG
-from your_module import BIGQUERY_LOAD  # Import BIGQUERY_LOAD from your module
-
-def load_table(rr_dataset, LOAD_SQL_DIR, table_name, current_year, curr_quarter, DAG, ENV, **kwargs):
-    """
-    Loads data into a table in BigQuery with specified parameters.
-
-    Parameters:
-    - rr_dataset (str): The target BigQuery dataset.
-    - LOAD_SQL_DIR (str): The directory containing the SQL file for loading data.
-    - table_name (str): The name of the target table.
-    - current_year (str): The current year.
-    - curr_quarter (str): The current quarter.
-    - DAG: The Directed Acyclic Graph associated with the task.
-    - ENV (str): The project environment.
-    - **kwargs: Additional keyword arguments, including 'ts' and other task-specific parameters.
-
-    Returns:
-    None
-    """
-    LOAD_START_DATE = kwargs['ti'].xcom_pull(task_ids='Extracts_dates_for_yearly_batch', key='from_date_dash')
-    LOAD_END_DATE = kwargs['ti'].xcom_pull(task_ids='Extracts_dates_for_yearly_batch', key='to_date_dash')
-    RegReportVersion = kwargs['ti'].xcom_pull(task_ids='get_RegReportVersion')[0]
-    ReportPeriod = curr_quarter
-    ReportYear = str(current_year)
-    CreateDateTime = str(kwargs['ts']).split("+")[0].replace("T", " ")
-    UpdateDateTime = str(kwargs['ts']).split("+")[0].replace("T", " ")
-
-    table_load = BIGQUERY_LOAD(
-        task_id="Load_table_id",
-        TGT_BQ_DATASET=rr_dataset,
-        TGT_BQ_OBJ_NAME=table_name,
-        SQL_FILE_DIR='',
-        LOAD_START_DATE=LOAD_START_DATE,
-        LOAD_END_DATE=LOAD_END_DATE,
-        VARIABLES_TO_REPLACE={
-            'from_date': LOAD_START_DATE,
-            'to_date': LOAD_END_DATE,
-            'RRVer': RegReportVersion,
-            'RepPeriod': ReportPeriod,
-            'RepYear': ReportYear,
-            'Create_DateTime': CreateDateTime,
-            'Update_DateTime': UpdateDateTime,
-            'project_env': ENV
-        },
-        LOAD_SQL_DIR=LOAD_SQL_DIR,
-        dag=DAG
-    )
-
-    table_load.execute(context=kwargs)
-
-
-from your_module import data_validations  # Import data_validations from your module
-
-def checkout(DQ_SQL_FILE, checkout_array_name, DAG, ENV, **kwargs):
-    """
-    Performs a checkout using data validations with specified parameters.
-
-    Parameters:
-    - DQ_SQL_FILE (str): The SQL file for data validations.
-    - checkout_array_name (str): The name of the checkout array.
-    - DAG: The Directed Acyclic Graph associated with the task.
-    - ENV (str): The project environment.
-    - **kwargs: Additional keyword arguments, including 'ts' and other task-specific parameters.
-
-    Returns:
-    None
-    """
-    RegReportVersion = kwargs['ti'].xcom_pull(task_ids='get_RegReportVersion')[0]
-    LOAD_START_DATE = kwargs['ti'].xcom_pull(task_ids='Extracts_dates_for_yearly_batch', key='from_date_dash')
-    LOAD_END_DATE = kwargs['ti'].xcom_pull(task_ids='Extracts_dates_for_yearly_batch', key='to_date_dash')
-
-    CHECKOUT_ENTRY = data_validations(
-        task_id="Checkout_id",
-        DQ_SQL_FILE=DQ_SQL_FILE,
-        load_batch_name="",
-        checkout_array_name=checkout_array_name,
-        load_start_date=LOAD_START_DATE,
-        load_end_date=LOAD_END_DATE,
-        checkout_variables_to_replace={
-            'RRVer': RegReportVersion,
-            'from_date': LOAD_START_DATE,
-            'to_date': LOAD_END_DATE,
-            'project_env': ENV
-        },
-        exit_criteria='error',
-        dag=DAG
-    )
-
-    CHECKOUT_ENTRY.execute(context=kwargs)
-
-
-def export_data(FILEGEN_SQL_DIR, report_name, file_extension, bucket_name, project_id, **kwargs):
-    """
-    Export data to Google Cloud Storage with specified parameters.
-
-    Parameters:
-    - FILEGEN_SQL_DIR (str): The directory containing SQL files for data export.
-    - report_name (str): The name of the report.
-    - file_extension (str): The file extension to be used for the exported file.
-    - bucket_name (str): The name of the Google Cloud Storage bucket.
-    - project_id (str): The ID of the Google Cloud project.
-    - **kwargs: Additional keyword arguments, including 'ts' and other task-specific parameters.
-
-    Returns:
-    None
-    """
-    bq_operations = bq_util()
-    file_operations = file_util()
-    gcs_operations = gcs_util()
-
-    for file in os.listdir(FILEGEN_SQL_DIR):
-        prefix = f"{report_name}/{file}{file_extension}"
-        
-        # Read SQL file
-        sql_query = file_operations.read_sql_file(os.path.join(FILEGEN_SQL_DIR, file))
-
-        # Run SQL query in BigQuery
-        sql_bq_load = bq_operations.run_query(sql_query)
-
-        # Upload result to Google Cloud Storage
-        uploaded_file = gcs_operations.upload_payload_storage(project_id, bucket_name, prefix, sql_bq_load)
+        Returns:
+            str: Content of the SQL file.
+        """
+        # Your implementation of reading SQL file
+        pass
