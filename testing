@@ -1,8 +1,8 @@
----landingtoraw_FPWHBN_to_FPWHBN_IDL.sql
+---landingtoraw_FPWHBN_to_FPWHBN.sql
 
 INSERT INTO `raw_as400us.FPWHBN`
 (
-	header__change_seq,
+    header__change_seq,
 	header__change_oper,
 	header__change_mast,
 	header__stream_position,
@@ -47,13 +47,13 @@ INSERT INTO `raw_as400us.FPWHBN`
     sourcemodified
 )
 SELECT 
-	'IDL',
-	'IDL',
-	'IDL',
-	'IDL',
-	'IDL',
-	'IDL',
-	landloaddate,
+	header__change_seq,
+	header__change_oper,
+	header__change_mast,
+	header__stream_position,
+	header__operation,
+	header__transaction_id,
+	header__timestamp,
     BNLOID,
     BNBINL,
     BNCOID,
@@ -88,7 +88,7 @@ SELECT
     BNRNGE,
     landloaddate,
     CURRENT_TIMESTAMP() as rawloaddate, 
-	CAST(FARM_FINGERPRINT(CONCAT(CONCAT(
+	CAST(FARM_FINGERPRINT(CONCAT(
     IFNULL(BNLOID, ''),
     IFNULL(BNBINL, ''),
     IFNULL(BNCOID, ''),
@@ -124,4 +124,5 @@ SELECT
   )) AS STRING) as rawrowhash,
     DATETIME(landloaddate, 'America/New_York') as sourcemodified
 FROM 
-    `da-qlk-prd-mscdirect.KATHYS.FPWHBN`;
+    `da-qlk-prd-mscdirect.KATHYS.FPWHBN__CT`
+	WHERE landloaddate>(SELECT MAX(landloaddate) FROM `da-qlk-prd-mscdirect.raw_as400us.FPWHBN`);
